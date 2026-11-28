@@ -283,16 +283,21 @@ describe("unlock dialog", () => {
 });
 
 describe("password change dialog", () => {
-    it("needs a matching confirmation, then uploads the new lock file", async () => {
-        const { ctx, raw, notices, secrets } = makeCtx({ autoUnlock: true });
+    const OLD = "the password set up before";
+
+    it("needs the current password and a matching confirmation, then uploads the new lock file", async () => {
+        const { ctx, raw, notices, secrets, acceptPassword } = makeCtx({ autoUnlock: true });
+        await acceptPassword(OLD);
         const m = new E2EEPasswordChangeModal(ctx.app, ctx);
         m.open();
         const { button, passwords } = parts(m);
         const change = button("e2eeChangePasswordButton");
-        const [pw, confirm] = passwords();
+        const [current, pw, confirm] = passwords();
 
         await type(pw, GOOD);
-        expect(change.disabled).toBe(true);
+        await type(confirm, GOOD);
+        expect(change.disabled, "without the current password").toBe(true);
+        await type(current, OLD);
         await type(confirm, GOOD + "!");
         expect(change.disabled).toBe(true);
         await type(confirm, GOOD);
@@ -300,19 +305,64 @@ describe("password change dialog", () => {
         await press(change);
 
         const hashed = await hashPassword(GOOD);
+        expect(raw.cryptoEngine.verifyPassword).toHaveBeenCalledWith("lock-blob", await hashPassword(OLD));
         expect(raw.vaultLockService.uploadLockFile).toHaveBeenCalledWith(`lock-for:${hashed}`);
         expect(secrets.get("e2ee-password")).toBe(hashed);
         expect(notices).toEqual(["noticeE2EEPasswordChanged"]);
         expect(m.isOpen).toBe(false);
     });
 
+    it("changes nothing with a wrong current password", async () => {
+        const { ctx, raw, notices, secrets, acceptPassword } = makeCtx({ autoUnlock: true });
+        await acceptPassword(OLD);
+        const m = new E2EEPasswordChangeModal(ctx.app, ctx);
+        m.open();
+        const { el, button, passwords } = parts(m);
+        const [current, pw, confirm] = passwords();
+        await type(current, "a guess");
+        await type(pw, GOOD);
+        await type(confirm, GOOD);
+        await press(button("e2eeChangePasswordButton"));
+
+        expect(raw.cryptoEngine.updatePassword).not.toHaveBeenCalled();
+        expect(raw.vaultLockService.uploadLockFile).not.toHaveBeenCalled();
+        expect(secrets.get("e2ee-password")).toBe("stale");
+        expect(notices).toEqual(["e2eeUnlockFailed"]);
+        expect(el.textContent).toContain(t("e2eeUnlockFailed"));
+        // Checking the password must not go through unlock: a wrong one would lock the vault
+        expect(raw.cryptoEngine.unlockVault).not.toHaveBeenCalled();
+        expect(m.isOpen).toBe(true);
+        expect(button("e2eeChangePasswordButton").disabled).toBe(false);
+    });
+
+    it("changes nothing when the current password cannot be checked", async () => {
+        const { ctx, raw, acceptPassword } = makeCtx();
+        await acceptPassword(OLD);
+        raw.vaultLockService.downloadLockFile.mockRejectedValueOnce(new Error("offline"));
+        const m = new E2EEPasswordChangeModal(ctx.app, ctx);
+        m.open();
+        const { el, button, passwords } = parts(m);
+        const [current, pw, confirm] = passwords();
+        await type(current, OLD);
+        await type(pw, GOOD);
+        await type(confirm, GOOD);
+        await press(button("e2eeChangePasswordButton"));
+
+        expect(raw.cryptoEngine.updatePassword).not.toHaveBeenCalled();
+        expect(el.textContent).toContain(t("e2eeRecoveryVerifyError"));
+        expect(el.textContent).not.toContain(t("e2eeUnlockFailed"));
+        expect(m.isOpen).toBe(true);
+    });
+
     it("keeps the dialog usable when the upload fails", async () => {
-        const { ctx, raw } = makeCtx();
+        const { ctx, raw, acceptPassword } = makeCtx();
+        await acceptPassword(OLD);
         raw.vaultLockService.uploadLockFile.mockRejectedValueOnce(new Error("offline"));
         const m = new E2EEPasswordChangeModal(ctx.app, ctx);
         m.open();
         const { button, passwords } = parts(m);
-        const [pw, confirm] = passwords();
+        const [current, pw, confirm] = passwords();
+        await type(current, OLD);
         await type(pw, GOOD);
         await type(confirm, GOOD);
         await press(button("e2eeChangePasswordButton"));

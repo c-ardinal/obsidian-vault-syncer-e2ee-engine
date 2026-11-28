@@ -427,7 +427,13 @@ export class E2EEUnlockModal extends Modal {
 /**
  * Password Change Modal
  */
+/**
+ * The current password is asked first: an unlocked vault alone is not enough
+ * (with auto-unlock on, anyone at the device could set a password of their
+ * own and then read the recovery code with it).
+ */
 export class E2EEPasswordChangeModal extends Modal {
+    private currentPassword = "";
     private newPassword = "";
     private confirmPassword = "";
     private passwordInput?: HTMLInputElement;
@@ -449,6 +455,17 @@ export class E2EEPasswordChangeModal extends Modal {
 
         const desc = contentEl.createEl("p");
         setTextWithBreaks(desc, this.ctx.t("e2eeChangePasswordDesc"));
+
+        addPasswordInput({
+            container: contentEl,
+            t: (k) => this.ctx.t(k),
+            label: this.ctx.t("e2eeChangePasswordCurrentLabel"),
+            autocomplete: "current-password",
+            onPasswordChange: (pw) => {
+                this.currentPassword = pw;
+                this.updateButtonState();
+            },
+        });
 
         // New password input with show/hide toggle
         this.passwordInput = addPasswordInput({
@@ -488,6 +505,8 @@ export class E2EEPasswordChangeModal extends Modal {
                 });
             });
 
+        const showError = createErrorLine(contentEl);
+
         // Change Password button
         new Setting(contentEl).addButton((btn) => {
             this.changeBtn = btn;
@@ -497,6 +516,30 @@ export class E2EEPasswordChangeModal extends Modal {
                 .onClick(async () => {
                     btn.setDisabled(true);
                     btn.setButtonText("...");
+                    showError("");
+                    let current: boolean;
+                    try {
+                        const blob = await this.ctx.vaultLockService.downloadLockFile();
+                        current = await this.ctx.cryptoEngine.verifyPassword(
+                            blob,
+                            await hashPassword(this.currentPassword),
+                        );
+                    } catch (e) {
+                        // The lock file could not be read (offline): the password was not checked
+                        const message = `${this.ctx.t("e2eeRecoveryVerifyError")} ${formatError(e)}`;
+                        showError(message);
+                        new Notice(message);
+                        btn.setButtonText(this.ctx.t("e2eeChangePasswordButton"));
+                        this.updateButtonState();
+                        return;
+                    }
+                    if (!current) {
+                        showError(this.ctx.t("e2eeUnlockFailed"));
+                        await this.ctx.notify("e2eeUnlockFailed");
+                        btn.setButtonText(this.ctx.t("e2eeChangePasswordButton"));
+                        this.updateButtonState();
+                        return;
+                    }
                     try {
                         const hashedPassword = await hashPassword(this.newPassword);
                         const newBlob = await this.ctx.cryptoEngine.updatePassword(hashedPassword);
@@ -525,7 +568,8 @@ export class E2EEPasswordChangeModal extends Modal {
 
     private updateButtonState() {
         if (this.changeBtn) {
-            const valid = isPasswordAcceptable(this.newPassword, this.ctx.checkPasswordStrength)
+            const valid = this.currentPassword.length > 0
+                && isPasswordAcceptable(this.newPassword, this.ctx.checkPasswordStrength)
                 && this.newPassword === this.confirmPassword;
             this.changeBtn.setDisabled(!valid);
         }
